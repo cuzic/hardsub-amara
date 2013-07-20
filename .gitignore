@@ -1,0 +1,18 @@
+# vim swap files
+*.swp
+
+# rbenv local version file
+.ruby-version
+
+# bundle lock file
+Gemfile.lock
+
+# config file that contains amora.org Api key 
+config.json
+
+# temporary files directory
+json
+srt
+ass
+youtube
+hardsub
