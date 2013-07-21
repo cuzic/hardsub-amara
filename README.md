@@ -1,4 +1,4 @@
-rdsub-amara
+hardsub-amara
 =============
 
 ## Description
@@ -20,14 +20,20 @@ rdsub-amara
 
 ## How to Use:
 
-    # download amara's json
+```sh
+    # download amara's jsons
     rake setup
+```
     
+```sh
     # download amara's srt and create ass
-    rake download sub
+    rake download_sub
+````
     
+```sh
     # download youtube flv's and hardsub them
     rake hardsub
+```
 
 ## Requirements:
   * **ruby 2.0**

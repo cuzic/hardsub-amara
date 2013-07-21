@@ -38,43 +38,57 @@ def curl *args
   end
 end
 
-directory "json"
-rule %r(json/\d+.json) => "json" do |t|
-  offset = t.name[%r(json/(\d+).json),1]
-  puts offset
-  path = "videos/?offset=#{offset}"
-  curl t.name, path
+def skip filename
+  STDERR.puts "fail #{filename}"
+  File.unlink(filename)
 end
 
+def is_successfully_downloaded? filename
+  unless File.file?(filename)
+    return false
+  end
+
+  body = open(filename).read
+  case
+  when body.size < 4
+    return false
+  when body.include?("504 Gateway Time-out")
+    return false
+  when body.include?("502 Bad Gateway")
+    return false
+  when filename.end_with?(".json") && JSON(body)["objects"].nil?
+    return false
+  end
+  return true
+end
+
+desc "download json files from amara.org"
 task :setup do
   0.step(500_000, 20) do |i|
     Rake::Task["json/#{i}.json"].invoke
   end
 end
 
-def skip filename
-  STDERR.puts "fail #{filename}"
-  File.unlink(filename)
+directory "json"
+
+rule %r(json/\d+.json) => "json" do |t|
+  path = t.name.gsub(%r(^json/(\d+).json$), "videos/?offset=\\1")
+  curl t.name, path
 end
 
+desc "download subtitles from amara.org only if the movie has both Japanese and English subtitles"
 task :download_sub do |t|
   Dir.glob("json/*.json") do |filename|
-    body = open(filename).read
-    if body.size < 4 then
+    unless is_successfully_downloaded? filename then
       File.unlink filename
       next
     end
-    if body =~ /504 Gateway Time-out|502 Bad Gateway/ or
-      (json = JSON(body))["objects"].nil? then
-      skip filename
-      next
-    end
 
+    json = open(filename).read
     json["objects"].each do |o|
       langs = o["languages"]
       if langs.any?{|t| t["code"] == "ja"} and
-        langs.any?{|t| t["code"] == "en"} and
-
+        langs.any?{|t| t["code"] == "en"} then
         ass = "ass/#{o["id"]}.ass"
         Rake::Task[ass].invoke
       end
@@ -99,25 +113,23 @@ end
 
 def redownload file
   2.times do
-    if !File.file?(file) or
-      open(file).read.include?("502 Bad Gateway") or
-      File.size(file) < 10 then
+    if is_successfully_downloaded? file then
+      return true
+    else
       File.unlink file if File.file?(file)
       sh "rake #{file}"
-    else
-      return true
+      if is_successfully_downloaded? file then
+        return true
+      end
     end
   end
-  File.unlink file if File.file?(file)
   return false
 end
 
 directory "ass"
-rule2 %r(ass/(\w+).ass) => [
-  "srt/\\1-en.srt",
-  "srt/\\1-ja.srt",
-  "ass/"
-] do |t|
+rule2 %r(ass/(\w+).ass) => %w(
+  srt/\\1-en.srt srt/\\1-ja.srt ass/
+) do |t|
   target = t.name
   en, ja, = t.sources
   if redownload en and redownload ja then
@@ -126,40 +138,39 @@ rule2 %r(ass/(\w+).ass) => [
   end
 end
 
+desc "download youtube flv's with Japanese/English subtitles"
 task :"youtube-dl" do
   Dir.glob("ass/*.ass") do |filename|
     id = file.basename(filename, ".ass")
-    rake::task["youtube/#{id}/.mp4"].invoke
+    rake::task["youtube/#{id}/.flv"].invoke
   end
 end
 
+desc "reencode youtube flv's with hardsubbed Japanese/English subtitles"
 task :"hardsub" do
-  Dir.glob("srt/*-ja.srt").map do |janame|
+  Dir.glob("srt/*-ja.srt").each_with_object [] do |janame, ary|
     ja_size = File.size(janame)
     enname = janame.gsub("ja", "en")
     if File.file? enname and
       File.size(enname) > 2000 and 
       File.size(janame) > 2000 then
       en_size = File.size(enname) 
-      #[janame, ja_size.to_f / en_size]
-      [janame, File.size(enname)]
-    else
-      nil
+      ary << [janame, ja_size.to_f / en_size]
     end
-  end.select{|t| t}.sort_by {|fname, size| -size }.each do |fname, size|
+  end.sort_by {|fname, size| -size }.each do |fname, size|
     id = fname[%r(srt/(.+)-ja.srt), 1]
-    Rake::Task["hardsub/#{id}/.mp4"].invoke
+    Rake::Task["hardsub/#{id}/.avi"].invoke
   end
 end
 
-rule2 %r(youtube/(\w+)/.mp4) => [
-  "youtube/", "youtube/\\1/"
-] do |t|
-  id = t.name[%r(youtube/(\w+)/.mp4), 1]
-  dir = "youtube/#{id}"
+rule2 %r(youtube/(\w+)/.flv) => %w(
+  youtube/ youtube/\\1/
+) do |t|
+  _, dir = t.sources
+  p dir
   if Dir.glob("#{dir}/*.flv").size < 1 then
-    path = "videos/#{id}/"
-    json = curl(path)
+    path = dir.gsub("youtube/", "videos/") + "/"
+    json = curl path
     if urls = json["all_urls"] then
       url = urls.first
       unless url.nil? or
@@ -168,7 +179,8 @@ rule2 %r(youtube/(\w+)/.mp4) => [
           commandline = "youtube-dl --write-info-json #{url} --restrict-filenames"
           begin
             sh commandline
-          rescue
+          rescue 
+            $stderr.puts $!
           end
         end
       end
@@ -176,20 +188,20 @@ rule2 %r(youtube/(\w+)/.mp4) => [
   end
 end
 
-rule2 %r(hardsub/(\w+)/.mp4) => [
-  "ass/\\1.ass",
-  "youtube/\\1/.mp4",
-  "hardsub/\\1/"
-] do |t|
-  _, mp4, dir = t.sources
-  glob = mp4.gsub(".mp4", "*.flv")
+rule2 %r(hardsub/(\w+)/.avi) => %w(
+  ass/\\1.ass youtube/\\1/.flv hardsub/\\1/
+) do |t|
+  _, flv, dir = t.sources
+  glob = flv.gsub(".flv", "*.flv")
   flv = Dir.glob(glob).first
 
   unless flv.nil? then
-    target = flv.gsub("youtube", "hardsub").gsub(".flv", ".mp4")
-    unless File.file? target then
-      ass, = t.sources
-      combine target, flv, ass
+    unless flv.end_with? "error.flv" then
+      target = flv.gsub("youtube", "hardsub").gsub(".flv", ".avi")
+      unless File.file? target then
+        ass, = t.sources
+        combine target, flv, ass
+      end
     end
   end
 end
@@ -198,21 +210,29 @@ def combine target, original, ass
   options = {
     :source => original,
     :output => target,
-    #:vf => "dsize=480:352:2,scale=-8:-8,harddup",
-    :vf => "dsize=480:320:2,scale=-8:-8,expand=480:320::0:1,harddup",
     :of => "lavf",
-    #:lavfopts => "format=mp4",
-    :oac => "mp3lame",
-    #:oac => "lavc",
-    #:lavcopts => "acodec=libfaac",
-    :ovc => "x264",
     :"ass-line-spacing" => "0",
     :subcp => "utf-8",
     :"subfont-text-scale" => "3",
     :sub => ass,
-    :x264encopts => <<X264.chomp,
-    preset=ultrafast:tune=film:crf=27:frameref=7:threads=auto
-X264
+
+    :vf => "dsize=480:320:2,scale=-8:-8,expand=480:320::0:1,harddup",
+
+    :oac => "mp3lame",
+    :ovc => "xvid",
+    :xvidencopts => "fixed_quant=4:autoaspect"
+    
+    #:lavfopts => "format=mp4:o=absf=aac_adtstoasc",
+    #:oac => "faac",
+    #:ovc => "x264",
+    #:x264encopts => %w(preset=ultrafast tune=film crf=27 frameref=7
+    #                   threads=auto global_header).join(":")
+
+    #:lavfopts => "format=mp4:o=absf=aac_adtstoasc",
+    #:oac => "lavc",
+    #:lavcopts => "acodec=libfaac:abitrate=32768:o=absf=aac_adtstoasc",
+    #:x264encopts => %w(preset=ultrafast tune=film crf=27 frameref=7
+    #                   threads=auto global_header).join(":")
   }
 
   if ENV["DEBUG"] then
